@@ -75,9 +75,9 @@ void ReadNByte(uchar* dat, u16 n, uchar use_user_space) {
   uchar i;
   if (use_user_space) dat = user_space_mem;  // 将指针定位到用户区内存中
   for (i = 0; i < n; i++) {
-    dat[i] = SBUF;
-    while (!RI)
+		while (!RI)
       ;
+    dat[i] = SBUF;
     RI = 0;
   }
 }
