@@ -1,13 +1,21 @@
 #include <reg52.h>
 
 #define WORKING_MODE 1  // 0为动态模式，1为静态模式
-#define HEAP_MEMORY_SIZE 1
-#define USER_HEAP_MEM_SIZE 25
-#define USE_LARGE 1          // 是否使用Large 模式编译
+#if WORKING_MODE == 0  // 只有为动态模式才需要为全局指针变量分配堆内存
+#define HEAP_MEMORY_SIZE \
+  48  // 可以调节堆内存空间和用户堆内存空间以最大化利用RAM
+#endif
+#define USER_HEAP_MEM_SIZE 24
+#define USE_LARGE 0          // 是否使用Large 模式编译
 #define USE_IDATA_IN_HEAP 1  // 堆内存是否存在idata区中
-#define SIGMOID_OPTIMIZE 3   // sigmoid优化模式
+// sigmoid优化模式：
+// 0: 直接进行sigmoid计算
+// 1: 直接查表
+// 2: 查表+平均插值
+// 3: 查表+线性插值
+#define SIGMOID_OPTIMIZE 2
 #if SIGMOID_OPTIMIZE >= 1
-#define SIGMOID_PRECISION 100
+#define SIGMOID_PRECISION 500  // 使用精度500的sigmoid表
 #endif
 
 #define ERROR_ERR_CMD_TYPE 1
@@ -31,14 +39,19 @@ uchar evaluate_tmp_mem_len;  // 运算临时内存的长度
 #elif WORKING_MODE == 1
 #include <static_mode.h>
 #endif
-u16 used_mem;  // heap_memory使用的内存
-uchar user_space_mem[USER_HEAP_MEM_SIZE];
+
+#if USE_IDATA_IN_HEAP && !USE_LARGE
+idata
+#endif
+    uchar user_space_mem[USER_HEAP_MEM_SIZE];
+
+// HeapMemory
+#if WORKING_MODE == 0
 #if USE_IDATA_IN_HEAP && !USE_LARGE
 idata
 #endif
     uchar heap_memory[HEAP_MEMORY_SIZE];
-
-// HeapMemory
+u16 used_mem;  // heap_memory使用的内存
 uchar NewMem(uchar* ptr, u16 count) {
   if (used_mem + count > HEAP_MEMORY_SIZE)
     return ERROR_ERR_LACK_OF_MEM;  //堆内存不足
@@ -46,9 +59,10 @@ uchar NewMem(uchar* ptr, u16 count) {
   used_mem += count;
   return 0;
 }
+#endif
 
 uchar CopyMem(uchar* src_ptr, uchar* dest_ptr, u16 len) {
-  u16 i;
+  idata u16 i;
   for (i = 0; i < len; i++) {
     dest_ptr[i] = src_ptr[i];
   }
@@ -91,7 +105,7 @@ void WriteNFloat(float* dat, u16 n) {
 // 指令层
 
 #define PING_ID 0
-
+#if WORKING_MODE == 0
 #define SET_STRUCT_ID 2
 struct SET_STRUCT {
   uchar layer_count;  // 需要校验：大于等于2
@@ -103,6 +117,7 @@ struct SET_WEIGHTS {
   uchar layer_id;  // 需要校验：存在layer
   float* weights;
 };
+#endif
 
 #define EVALUATE_ID 6
 struct EVALUATE {
@@ -120,13 +135,16 @@ struct ERROR {
 };
 
 union COMMAND {  // 利用共用体优化RAM空间占用
+#if WORKING_MODE == 0
   struct SET_STRUCT set_struct;
   struct SET_WEIGHTS set_weights;
+#endif
   struct EVALUATE evaluate;
   struct EVALUATE_ACK evaluate_ack;
   struct ERROR error;
 };
 
+#if WORKING_MODE == 0
 void ComputeWeightMatrixLen() {
   uchar i;
   weight_matrix_len = 0;
@@ -135,6 +153,7 @@ void ComputeWeightMatrixLen() {
         (neurons_count_list[i - 1] + 1) * neurons_count_list[i];
   }
 }
+#endif
 
 u16 GetLayerWeightIndex(uchar layer) {
   uchar i;
@@ -145,8 +164,11 @@ u16 GetLayerWeightIndex(uchar layer) {
   return result;
 }
 
+#if WORKING_MODE == 0
 uchar set_struct(struct SET_STRUCT* param);
 uchar set_weights(struct SET_WEIGHTS* param, u16 weights_count);
+#endif
+uchar evaluate(struct EVALUATE* param);
 
 #define RETURN_ERROR                                                 \
   if (err != 0) {                                                    \
@@ -159,9 +181,11 @@ uchar set_weights(struct SET_WEIGHTS* param, u16 weights_count);
 
 void ReadPacket() {
   uchar type_id;
-  union COMMAND cmd;
+  idata union COMMAND cmd;
   uchar err;
+#if WORKING_MODE == 0
   u16 tmp;
+#endif
   while (1) {
     ReadNByte(&type_id, sizeof(type_id), 0);
     switch (type_id) {
@@ -169,6 +193,7 @@ void ReadPacket() {
         type_id++;
         WriteNByte(&type_id, sizeof(type_id));
         break;
+#if WORKING_MODE == 0
       case SET_STRUCT_ID:
         ReadNByte(&cmd.set_struct.layer_count,
                   sizeof(cmd.set_struct.layer_count), 0);
@@ -189,6 +214,7 @@ void ReadPacket() {
         type_id++;
         WriteNByte(&type_id, sizeof(type_id));
         break;
+#endif
       case EVALUATE_ID:
         ReadNFloat(cmd.evaluate.input_data, neurons_count_list[0]);
         err = evaluate(&cmd.evaluate);
@@ -198,12 +224,15 @@ void ReadPacket() {
         WriteNFloat(cmd.evaluate_ack.output_data,
                     neurons_count_list[layer_count - 1]);
         break;
+      default:
+        err = ERROR_ERR_CMD_TYPE;
+        RETURN_ERROR
     }
   }
 }
 
 // 运算层
-
+#if WORKING_MODE == 0
 uchar set_struct(struct SET_STRUCT* param) {
   uchar err;
   uchar i;
@@ -237,11 +266,12 @@ uchar set_weights(
           weights_count);
   return 0;
 }
-
+#endif
 #define START_POINT -100
 #define SG_LEN 200
 #if SIGMOID_OPTIMIZE >= 1
-float GetSigmoid(int index) {
+#include "sigmoid_table.h"
+float GetSigmoid(int index) {  //可进行sigmoid边界检查
   if (index < 0) return 0;
   if (index > SIGMOID_PRECISION) return 1;
   return sigmoid_table[index];
@@ -251,19 +281,16 @@ float GetSigmoid(int index) {
 #include <math.h>
 float sigmoid(float n) { return 1 / (1 + exp(-n)); }
 #elif SIGMOID_OPTIMIZE == 1
-#include "sigmoid_table.h"
 float sigmoid(float n) {
   return GetSigmoid((int)(SIGMOID_PRECISION * (n - START_POINT) / SG_LEN));
 }
 #elif SIGMOID_OPTIMIZE == 2
 #include <math.h>
-#include "sigmoid_table.h"
 float sigmoid(float n) {
-  return (GetSigmoid((int)ceil(n)) + GetSigmoid((int)floor(n))) / 2;
+  return (GetSigmoid((u16)ceil(n)) + GetSigmoid((u16)floor(n))) / 2;
 }
 #elif SIGMOID_OPTIMIZE == 3
 #include <math.h>
-#include "sigmoid_table.h"
 float sigmoid(float n) {
   float tmp = SIGMOID_PRECISION * (n - START_POINT) / SG_LEN;
   int a = (int)ceil(tmp);
@@ -276,12 +303,12 @@ float sigmoid(float n) {
 #endif
 
 uchar evaluate(struct EVALUATE* param) {
-  uchar i;
-  uchar j;
-  uchar k;
-  float* ptr = weight_matrix;
-  uchar* layer_ptr = weight_matrix + GetLayerWeightIndex(1);
-  float* input_data = param->input_data;
+  idata uchar i;
+  idata uchar j;
+  idata uchar k;
+  idata float* ptr = weight_matrix;
+  idata uchar* layer_ptr = weight_matrix + GetLayerWeightIndex(1);
+  idata float* input_data = param->input_data;
   for (i = 1; i < layer_count; i++) {
     for (j = 0; j < neurons_count_list[j]; j++) {
       evaluate_tmp_mem[j] = 0;
@@ -306,10 +333,7 @@ int main() {
   PCON = 0X80;  //波特率加倍
   TH1 = 0XF3;   //计数器初始值设置，波特率4800
   TL1 = 0XF3;
-  ES = 1;   //打开接收中断
-  EA = 1;   //打开总中断
   TR1 = 1;  //打开计数器
-  while (1)
-    ;
+  ReadPacket();
   return 0;
 }
